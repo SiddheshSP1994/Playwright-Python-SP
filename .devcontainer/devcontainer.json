@@ -1,0 +1,11 @@
+
+{
+  "name": "Playwright-Python-SP",
+  "image": "mcr.microsoft.com/playwright/python:v1.46.0-focal",
+  "postCreateCommand": "pip install -U pip && (test -f requirements.txt && pip install -r requirements.txt || true) && pip install pytest httpx pyyaml",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-playwright.playwright"]
+    }
+  }
+}
