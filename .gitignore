@@ -27,3 +27,9 @@ Thumbs.db
 .vscode/
 .idea/
 *.iml
+
+
+# Test reports
+/reports/
+/pytest-report.html
+

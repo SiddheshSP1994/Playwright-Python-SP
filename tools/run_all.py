@@ -63,10 +63,13 @@ def main() -> int:
         print("pytest not installed. Run: pip install -r requirements.txt", file=sys.stderr)
         return 1
 
+    # ensure report dir exists
+    report_dir = Path("reports")
+    report_dir.mkdir(parents=True, exist_ok=True)
     return pytest.main([
         "-n", "auto", "--maxfail=1",
         "--alluredir", "allure-results",
-        "--html", "pytest-report.html", "--self-contained-html",
+        "--html", str(report_dir / "pytest-report.html"), "--self-contained-html",
         "--junitxml", "reports/junit.xml",
     ])
 
