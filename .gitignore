@@ -1,0 +1,29 @@
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual envs & env files
+.venv/
+.env/
+
+# Pytest / coverage / reports
+.pytest_cache/
+.allure/
+allure-results/
+allure-report/
+coverage.xml
+htmlcov/
+
+# Playwright artifacts
+playwright/.cache/
+playwright-report/
+test-results/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.iml
