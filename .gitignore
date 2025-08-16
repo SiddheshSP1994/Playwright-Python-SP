@@ -1,45 +1,14 @@
-# Bytecode / caches
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
+# Reports & Artifacts
+playwright-report/**
+artifacts/**
+allure-results/**
+
+# Python
+__pycache__/**
 *.pyc
-*.so
-*.dylib
-*.dll
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Envs
-.env
 .venv/
-venv/
-env/
+.env
 
-# Editors/OS
-.idea/
-.vscode/
+# OS
 .DS_Store
-
-# Builds/dist
-build/
-dist/
-*.egg-info/
-
-# Coverage/Reports
-.coverage
-.coverage.*
-htmlcov/
-allure-results/
-allure-report/
-playwright-report/
-reports/
-artifacts/
-pytest-report.html
-
-# Logs
-*.log
-
-# Node (if any demo assets)
-node_modules/
+Thumbs.db
