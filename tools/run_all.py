@@ -1,78 +1,80 @@
-# tools/run_all.py
 from __future__ import annotations
-import os, sys, time, socket, atexit, multiprocessing as mp
-from pathlib import Path
+import os
+import sys
+import json
+import pathlib
+import subprocess
 
-PAY_HOST, PAY_PORT = "127.0.0.1", int(os.getenv("PAY_PORT", "8081"))
-MAIL_HOST, MAIL_PORT = "127.0.0.1", int(os.getenv("MAIL_PORT", "8082"))
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+ART = ROOT / "artifacts"
+HTML_DIR = ROOT / "playwright-report"
+HTML_REPORT = HTML_DIR / "report.html"
+ALLURE_DIR = ROOT / "allure-results"
 
-def wait_port(host: str, port: int, timeout: float = 90.0) -> None:
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        try:
-            with socket.create_connection((host, port), timeout=1.0):
-                return
-        except OSError:
-            time.sleep(0.2)
-    raise RuntimeError(f"Port {host}:{port} not ready after {timeout}s")
+for p in (ART, HTML_DIR, ALLURE_DIR):
+    p.mkdir(parents=True, exist_ok=True)
 
-def run_uvicorn_import(import_str: str, host: str, port: int) -> None:
-    # Ensure project root (parent of tools/) is on sys.path
-    root = Path(__file__).resolve().parent.parent
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
+RUN_SUITE = os.getenv("RUN_SUITE", "smoke").lower()  # smoke | full
+BROWSER = os.getenv("BROWSER", "chromium")
+AI_ENABLED = os.getenv("AI_ENABLED", "0") == "1"
 
-    import uvicorn
-    # Pass import string (picklable) instead of app object
-    uvicorn.run(import_str, host=host, port=port, log_level="info")
+PY = sys.executable  # always use the same interpreter that launched this script
 
-def start_fakes() -> list[mp.Process]:
-    procs: list[mp.Process] = []
-    # Start payment and mail fakes via import strings
-    for import_str, host, port in (
-        ("services.fakes.payment_gateway.app:app", PAY_HOST, PAY_PORT),
-        ("services.fakes.mail.app:app",           MAIL_HOST, MAIL_PORT),
-    ):
-        p = mp.Process(target=run_uvicorn_import, args=(import_str, host, port), daemon=True)
-        p.start()
-        procs.append(p)
+def run_pytest(extra_args: list[str]) -> int:
+    cmd = [
+        PY, "-m", "pytest", "-q",
+        f"--browser={BROWSER}",
+        f"--html={HTML_REPORT}",
+        "--self-contained-html",
+        f"--alluredir={ALLURE_DIR}",
+    ]
+    if RUN_SUITE == "smoke":
+        cmd += ["-m", "smoke"]
+    if AI_ENABLED:
+        cmd += ["-p", "plugins.ai_triage", "--ai-triage"]
+    cmd += extra_args
+    print("RUN:", " ".join(cmd), flush=True)
+    return subprocess.call(cmd, cwd=str(ROOT))
 
-    # Wait until both ports are reachable
-    wait_port(PAY_HOST, PAY_PORT, timeout=90)
-    wait_port(MAIL_HOST, MAIL_PORT, timeout=90)
-    return procs
-
-def main() -> int:
-    os.environ.setdefault("TEST_ENV", "default")
-    os.environ.setdefault("PAYMENTS_FAKE_URL", f"http://{PAY_HOST}:{PAY_PORT}")
-    os.environ.setdefault("MAIL_FAKE_URL", f"http://{MAIL_HOST}:{MAIL_PORT}")
-
-    procs: list[mp.Process] = []
-    def cleanup():
-        for p in procs:
-            if p.is_alive():
-                p.terminate()
-                p.join(timeout=5)
-    atexit.register(cleanup)
-
-    procs[:] = start_fakes()
-
+def collect_failures() -> list[str]:
+    cache = ROOT / ".pytest_cache" / "v" / "cache" / "lastfailed"
+    if not cache.exists():
+        return []
     try:
-        import pytest
-    except ImportError:
-        print("pytest not installed. Run: pip install -r requirements.txt", file=sys.stderr)
-        return 1
+        return list(json.loads(cache.read_text()).keys())
+    except Exception:
+        return []
 
-    # ensure report dir exists
-    report_dir = Path("reports")
-    report_dir.mkdir(parents=True, exist_ok=True)
-    return pytest.main([
-        "-n", "auto", "--maxfail=1",
-        "--alluredir", "allure-results",
-        "--html", str(report_dir / "pytest-report.html"), "--self-contained-html",
-        "--junitxml", "reports/junit.xml",
-    ])
+def write_stub_triage_md(first: list[str], remaining: list[str]) -> None:
+    md = ART / "ai-triage.md"
+    lines = [
+        "# Failure Triage (stub)",
+        f"- Suite: {RUN_SUITE}",
+        f"- Browser: {BROWSER}",
+        f"- First run failures: {len(first)}",
+        f"- After rerun failures: {len(remaining)}",
+        "",
+        "## Remaining failing tests",
+    ]
+    for nid in remaining:
+        lines.append(f"- `{nid}`")
+    md.write_text("\n".join(lines), encoding="utf-8")
+    print(f"Wrote {md}")
 
-if __name__ == "__main__":
-    mp.freeze_support()  # required on Windows
-    sys.exit(main())
+# First pass
+exit1 = run_pytest([])
+first = collect_failures()
+
+# One rerun for failed nodes (flake filter)
+exit2 = 0
+remaining = first
+if first:
+    exit2 = run_pytest(first)
+    remaining = collect_failures()
+
+if not AI_ENABLED:
+    write_stub_triage_md(first, remaining)
+else:
+    print("AI triage handled by plugins.ai_triage")
+
+sys.exit(exit1 or exit2)

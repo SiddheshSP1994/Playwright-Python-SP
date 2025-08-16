@@ -1,97 +1,96 @@
+import os
+import re
+import pathlib
+from collections import defaultdict
+import pytest
 
-from __future__ import annotations
-import os, json, traceback, hashlib
-from pathlib import Path
-from datetime import datetime
+ART = pathlib.Path("artifacts")
+ART.mkdir(parents=True, exist_ok=True)
 
-from ai.providers import get_provider
-from ai.registry import get_prompt
+KEY_HINTS = [
+    (re.compile(r"timeout|timed out|waiting for", re.I), "Wait/selector stability: use explicit waits or stabilize network/fixtures."),
+    (re.compile(r"locator|no such element|selector", re.I), "Selector robustness: prefer role-based locators and stable attributes."),
+    (re.compile(r"AssertionError", re.I), "Expectation mismatch: verify test data and assertions."),
+    (re.compile(r"\b5\d{2}\b|ECONN|network", re.I), "Service dependency: fake/stub backend or retry with backoff."),
+    (re.compile(r"TypeError|KeyError|AttributeError", re.I), "Test/page-object bug: add guards, null checks, or fix data shape."),
+]
 
-ART_DIR = Path(os.getenv("ARTIFACTS_DIR", "artifacts"))
-ART_DIR.mkdir(parents=True, exist_ok=True)
-JSON_PATH = ART_DIR / "ai_triage.json"
-MD_PATH = ART_DIR / "ai-triage.md"
+def _longrepr_text(rep):
+    try:
+        return rep.longreprtext  # pytest >=6
+    except Exception:
+        try:
+            return str(rep.longrepr)
+        except Exception:
+            return "unknown error"
 
-_failures = []
+def _signature(msg: str) -> str:
+    # Normalize: lowercase, strip variable bits (numbers/uuids), take first 160 chars
+    norm = msg.lower()
+    norm = re.sub(r"[0-9a-f]{8,}", "<id>", norm)  # crude uuid/hash mask
+    norm = re.sub(r"\d+", "<n>", norm)
+    return norm[:160]
 
-def _sig(item) -> str:
-    # hash on location + message head for clustering
-    msg = item.get("error", "")[:200]
-    loc = item.get("nodeid", "")
-    return hashlib.sha1((loc + "|" + msg).encode("utf-8")).hexdigest()[:10]
+def _hint_for(msg: str) -> str:
+    for pat, hint in KEY_HINTS:
+        if pat.search(msg):
+            return hint
+    return "Generic: check recent diffs, data seeding, and page object contracts."
 
-def pytest_addoption(parser):
-    group = parser.getgroup("ai_triage")
-    group.addoption("--ai-triage", action="store_true", default=False, help="Enable AI triage summary on sessionfinish")
+class AITriagePlugin:
+    def __init__(self, config: pytest.Config):
+        self.enabled = bool(config.getoption("--ai-triage")) or os.getenv("AI_ENABLED", "0") == "1"
+        self.provider = os.getenv("AI_PROVIDER", "stub")
+        self.failures = []
 
-def pytest_runtest_makereport(item, call):
-    # Collect failure info
-    if call.when == "call":
-        rep = call.excinfo
-        if rep is not None:
-            err = "".join(traceback.format_exception(rep.type, rep.value, rep.tb))
-            # Try to find last screenshot or trace
-            # Common Playwright outputs
-            screenshot = None
-            trace = None
-            candidates = [
-                Path("playwright-report"), Path("test-results"), Path("reports"), Path("artifacts")
-            ]
-            for base in candidates:
-                if base.exists():
-                    for p in base.rglob("*"):
-                        name = p.name.lower()
-                        if screenshot is None and name.endswith((".png",".jpg",".jpeg","screenshot.png")):
-                            screenshot = str(p)
-                        if trace is None and ("trace.zip" in name or name.endswith(".zip") and "trace" in name):
-                            trace = str(p)
-            _failures.append({
-                "nodeid": item.nodeid,
-                "error": err,
-                "screenshot": screenshot,
-                "trace": trace,
+    @pytest.hookimpl
+    def pytest_runtest_logreport(self, report: pytest.TestReport):
+        if not self.enabled:
+            return
+        if report.when == "call" and report.failed:
+            msg = _longrepr_text(report)
+            self.failures.append({
+                "nodeid": report.nodeid,
+                "message": msg,
             })
 
-def pytest_sessionfinish(session, exitstatus):
-    if not _failures:
-        # write empty files to keep CI predictable
-        JSON_PATH.write_text(json.dumps({"failures": [], "generated_at": datetime.utcnow().isoformat()+"Z"}, indent=2), encoding="utf-8")
-        MD_PATH.write_text("# AI Triage\n\nNo failures.\n", encoding="utf-8")
-        return
+    @pytest.hookimpl
+    def pytest_sessionfinish(self, session: pytest.Session, exitstatus: int):
+        if not self.enabled:
+            return
+        clusters = defaultdict(list)
+        for f in self.failures:
+            sig = _signature(f["message"])
+            clusters[sig].append(f)
 
-    # cluster by signature
-    clusters = {}
-    for f in _failures:
-        k = _sig(f)
-        clusters.setdefault(k, []).append(f)
+        lines = [
+            "# AI Triage (provider: stub)",
+            f"- Enabled: {self.enabled}",
+            f"- Failures observed: {len(self.failures)}",
+            f"- Clusters: {len(clusters)}",
+            "",
+        ]
+        for i, (sig, items) in enumerate(clusters.items(), 1):
+            sample_msg = items[0]["message"].splitlines()[0][:200]
+            lines += [
+                f"## Cluster {i}  — {len(items)} tests",
+                f"**Signature:** `{sig}`",
+                f"**Hypothesis:** {_hint_for(sample_msg)}",
+                "",
+                "**Examples:**",
+            ]
+            for it in items[:10]:
+                lines.append(f"- `{it['nodeid']}`")
+            lines.append("")
+            lines.append("<details><summary>Sample message</summary>\n\n```\n" + sample_msg + "\n```\n</details>\n")
 
-    data = {
-        "generated_at": datetime.utcnow().isoformat()+"Z",
-        "count": len(_failures),
-        "clusters": [{"id": k, "size": len(v), "samples": v[:3]} for k,v in clusters.items()],
-    }
-    JSON_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        out = ART / "ai-triage.md"
+        out.write_text("\n".join(lines), encoding="utf-8")
+        session.config.pluginmanager.get_plugin("terminalreporter").write_line(f"AI triage: wrote {out}")
 
-    # Compose context for AI
-    enable = os.getenv("AI_ENABLED", "1") == "1"
-    use_ai = enable and os.getenv("AI_PROVIDER", "stub") in ("stub","openai","openai_like","openai-like")
-    header = f"# AI Triage\n\nFailures: {len(_failures)} in {len(clusters)} cluster(s)\n\n"
-    body = ""
-    if use_ai and session.config.getoption("--ai-triage", default=False):
-        prov = get_provider()
-        prompt = get_prompt("triage")
-        context = json.dumps(data, ensure_ascii=False)
-        # Keep prompt small-ish
-        combined = f"{prompt}\n\nContext:\n{context[:60000]}"
-        resp = prov.chat(combined, system="You are a strict, concise test triage assistant.")
-        body = resp.text
-    else:
-        # Deterministic fallback summary
-        for k, v in clusters.items():
-            head = v[0]["error"].splitlines()[:3]
-            body += f"## Cluster {k} (size {len(v)})\n"
-            body += "````\n" + "\n".join(head) + "\n````\n\n"
-            body += "- Hints: check selectors, waits, and recent commits touching affected pages.\n\n"
+def pytest_addoption(parser: pytest.Parser):
+    group = parser.getgroup("ai-triage")
+    group.addoption("--ai-triage", action="store_true", default=False, help="Enable AI-assisted failure triage (stub provider)")
 
-    # Write markdown
-    MD_PATH.write_text(header + body + "\n", encoding="utf-8")
+def pytest_configure(config: pytest.Config):
+    config.pluginmanager.register(AITriagePlugin(config), name="ai-triage-plugin")

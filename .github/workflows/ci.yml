@@ -1,92 +1,107 @@
 name: CI
 
 on:
-  push:
-    branches: [ main, master ]
   pull_request:
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   tests:
-    name: Tests (${{ matrix.os }})
+    name: PR Smoke (${{ matrix.os }} • ${{ matrix.browser }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-    env:
-        PIP_DISABLE_PIP_VERSION_CHECK: "1"
-        PYTHONUNBUFFERED: "1"
-        ENFORCE_NO_SLEEP: "0"
-        ALLURE_RESULTS: allure-results
+        os: [windows-latest, ubuntu-latest]
+        browser: [chromium]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            C:\Users\runneradmin\AppData\Local\pip\Cache
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
 
       - name: Install dependencies
-        shell: bash
         run: |
-          python -m pip install -U pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          python -m pip install playwright
-          python -m playwright install --with-deps || python -m playwright install
 
-      - name: Cache Playwright browsers
+      - name: Playwright cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ms-playwright
-            C:\Users\runneradmin\AppData\Local\ms-playwright
-          key: ${{ runner.os }}-msplaywright-${{ hashFiles('**/requirements.txt') }}
+            /home/runner/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
-            ${{ runner.os }}-msplaywright-
+            pw-${{ runner.os }}-
 
-      - name: Run tests (parallel, fail-fast at 5, with Allure results)
-        shell: bash
-        run: |
-          pytest -n auto --maxfail=5 --alluredir="${ALLURE_RESULTS}"
+      - name: Install Playwright (Linux)
+        if: runner.os == 'Linux'
+        run: python -m playwright install --with-deps
 
-      - name: Upload Allure results (per OS)
+      - name: Install Playwright (Windows)
+        if: runner.os == 'Windows'
+        run: python -m playwright install
+
+      - name: Run smoke tests
+        env:
+          RUN_SUITE: smoke
+          BROWSER: ${{ matrix.browser }}
+        run: python tools/run_all.py
+
+      - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.os }}-allure-results
-          path: ${{ env.ALLURE_RESULTS }}
-          if-no-files-found: warn
+          name: artifacts-${{ matrix.os }}-${{ matrix.browser }}
+          path: |
+            artifacts/**
+            playwright-report/**
+            reports/**
 
-  merge-allure:
-    name: Merge Allure Results
-    needs: [tests]
+  nightly:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: tests
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
-      - name: Download Allure artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          path: ./artifacts
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
 
-      - name: Merge allure-results
+      - name: Install dependencies
         run: |
-          mkdir -p merged-allure-results
-          find artifacts -type d -name "allure-results" -print0 | while IFS= read -r -d '' dir; do
-            cp -r "$dir"/* merged-allure-results/ || true
-          done
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps
 
-      - name: Upload merged Allure results
+      - name: Full run
+        env:
+          RUN_SUITE: full
+        run: python tools/run_all.py
+
+      - name: Upload nightly artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: allure-results-merged
-          path: merged-allure-results
-          if-no-files-found: warn
+          name: nightly-artifacts
+          path: |
+            artifacts/**
+            playwright-report/**
+            reports/**
