@@ -1,14 +1,39 @@
-# Reports & Artifacts
-playwright-report/**
-artifacts/**
-allure-results/**
-
 # Python
-__pycache__/**
-*.pyc
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dylib
+*.egg-info/
+.eggs/
+dist/
+build/
 .venv/
+venv/
 .env
+.env.*
+.coverage
+coverage.xml
+htmlcov/
 
-# OS
+# IDE / OS
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Test reports & artifacts (keep out of Git)
+reports/**
+playwright-report/**
+allure-results/**
+artifacts/**
+test-results/**
+pytest-report.html
+trace.zip
+*.log
